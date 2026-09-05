@@ -78,17 +78,59 @@ let
         ++ lib.optional (desktopEnvironment == "niri") homeModules.niri
         ++ extraModules;
       };
-  homeConfigurations = lib.listToAttrs (
-    map (
-      system:
-      lib.nameValuePair "${canonicalUser}@${system}" (mkHomeConfiguration {
-        inherit system;
-        username = canonicalUser;
-        homeDirectory = defaultHomeDirectories.${system};
-        desktopEnvironment = null;
-      })
-    ) supportedSystems
-  );
+  nixosProfileModule = {
+    # Full workstation composition for the host-specific NixOS target.
+    mcb.profiles = {
+      base-desktop = true;
+      dev = true;
+      research = true;
+      gaming = true;
+      china-apps = true;
+      media = true;
+      life = true;
+      theming = true;
+      nix-tools = true;
+      containers = true;
+      observability = true;
+      hardware = true;
+      security-tools = true;
+      ai-tools = true;
+      modern-wm = true;
+      terminal-tools = true;
+    };
+    mcb.desktop.providers = {
+      kazumi = true;
+      steam = true;
+      wemeet = true;
+      clashVerge = true;
+    };
+  };
+  nixosHomeConfiguration = mkHomeConfiguration {
+    system = "x86_64-linux";
+    username = canonicalUser;
+    homeDirectory = defaultHomeDirectories."x86_64-linux";
+    desktopEnvironment = "niri";
+    extraModules = [
+      homeModules.nixos
+      nixosProfileModule
+    ];
+  };
+  homeConfigurations =
+    (lib.listToAttrs (
+      map (
+        system:
+        lib.nameValuePair "${canonicalUser}@${system}" (mkHomeConfiguration {
+          inherit system;
+          username = canonicalUser;
+          homeDirectory = defaultHomeDirectories.${system};
+          desktopEnvironment = null;
+        })
+      ) supportedSystems
+    ))
+    // {
+      # This target is intentionally host-specific; portable targets remain unchanged.
+      "${canonicalUser}@nixos" = nixosHomeConfiguration;
+    };
   sanitizeTarget =
     target:
     "${lib.strings.sanitizeDerivationName target}-${
@@ -112,6 +154,17 @@ let
         test -e ${homeConfiguration.activationPackage}/activate
         touch "$out"
       '';
+      nixosHomeManagerEval =
+        if system == "x86_64-linux" then
+          pkgs.runCommand "home-manager-eval-nixos"
+            {
+              drvPath = builtins.unsafeDiscardStringContext nixosHomeConfiguration.activationPackage.drvPath;
+            }
+            ''
+              printf '%s\n' "$drvPath" > "$out"
+            ''
+        else
+          null;
     in
     {
       home-manager-eval = homeManagerEval;
@@ -179,6 +232,9 @@ let
             deadnix --fail . 2>&1 | tee "$out"
             touch "$out"
           '';
+    }
+    // lib.optionalAttrs (nixosHomeManagerEval != null) {
+      nixos-home-manager-eval = nixosHomeManagerEval;
     };
 in
 {
