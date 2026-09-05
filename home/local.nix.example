@@ -1,0 +1,18 @@
+# 用户私有模块示例：需由调用方通过 `extraModules` 显式传入，不会被 standalone flake 自动发现。
+{ lib, pkgs, ... }:
+{
+  # Git 身份覆盖（仓库中 git.nix 使用占位值）
+  mcb.git.userName = lib.mkForce "你的名字";
+  mcb.git.userEmail = lib.mkForce "你的邮箱@example.com";
+
+  # 个人额外软件示例
+  # home.packages = with pkgs; [ localsend ];
+}
+
+# 仅为实际存在的宿主命令或 Flatpak 开启对应桌面入口：
+# mcb.desktop.providers = {
+#   kazumi = true;
+#   steam = true;
+#   wemeet = true;
+#   clashVerge = true;
+# };

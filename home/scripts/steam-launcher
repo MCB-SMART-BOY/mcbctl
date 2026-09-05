@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# 保持外层 Shell 存活：Steam FHS 的 bubblewrap 使用 --die-with-parent。
+
+set -euo pipefail
+
+if [ "$#" -eq 0 ]; then
+  set -- steam://open/games
+fi
+
+steam "$@"

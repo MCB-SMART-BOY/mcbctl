@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# 用于从 niri 启动应用时补齐 PATH，避免找不到命令。
+
+set -euo pipefail
+
+add_path() {
+  local dir="$1"
+  case ":${PATH}:" in
+    *":${dir}:"*) ;;
+    *) PATH="${dir}:${PATH}" ;;
+  esac
+}
+
+add_path "${HOME}/.local/bin"
+add_path "${HOME}/.nix-profile/bin"
+
+export PATH
+# 把传入的命令原样执行
+exec "$@"

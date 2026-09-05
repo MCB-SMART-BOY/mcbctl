@@ -1,0 +1,352 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+manifest="${HOME}/.config/toolchain/tools.json"
+dry_run=false
+action=""
+
+usage() {
+  printf 'Usage: mcb-toolchain [--dry-run] {bootstrap|upgrade|check}\n' >&2
+}
+
+fail_manifest() {
+  printf 'mcb-toolchain: invalid manifest %s: %s\n' "$manifest" "$1" >&2
+  exit 2
+}
+
+validate_manifest() {
+  [[ -r "$manifest" ]] || fail_manifest "file is not readable"
+  jq -e '
+    def package_name:
+      type == "string"
+      and test("^(@[A-Za-z0-9][A-Za-z0-9._-]*/)?[A-Za-z0-9][A-Za-z0-9._/+\\-]*$")
+      and (contains("://") | not)
+      and (contains("/../") | not);
+    def binary_name:
+      type == "string" and test("^[A-Za-z0-9][A-Za-z0-9_.+\\-]*$");
+    def row:
+      type == "object"
+      and (keys | sort) == ["binary", "package"]
+      and (.package | package_name)
+      and (.binary | binary_name);
+    def rows:
+      type == "array" and all(.[]; row);
+    type == "object"
+    and (keys | sort) == ["bun", "cargo", "go", "lean", "opam", "rust", "uv"]
+    and (.rust | type == "object"
+      and (keys | sort) == ["channel", "components"]
+      and .channel == "stable"
+      and (.components | type == "array"
+        and all(.[]; . == "rust-analyzer" or . == "rustfmt" or . == "clippy")
+        and (length == (unique | length))))
+    and (.lean | type == "object"
+      and (keys | sort) == ["channel"]
+      and .channel == "stable")
+    and (.opam | rows)
+    and (.cargo | rows)
+    and (.go | rows)
+    and (.uv | rows)
+    and (.bun | rows)
+    and ([.opam[], .cargo[], .go[], .uv[], .bun[]] | map(.binary) | (length == (unique | length)))
+  ' "$manifest" >/dev/null 2>&1 || fail_manifest "expected stable channels and safe package/binary rows"
+}
+
+manifest_rows() {
+  jq -r --arg manager "$1" '.[$manager][] | [.package, .binary] | @tsv' "$manifest"
+}
+
+run_command() {
+  if "$@"; then
+    return 0
+  fi
+  printf 'mcb-toolchain: command failed (%s)\n' "$1" >&2
+  return 1
+}
+
+require_manager() {
+  local manager=$1
+  if command -v "$manager" >/dev/null 2>&1; then
+    return 0
+  fi
+  printf 'mcb-toolchain: required manager is missing: %s\n' "$manager" >&2
+  return 1
+}
+
+binary_present() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+manager_binary_present() {
+  local manager=$1
+  local binary=$2
+  if [[ "$manager" == opam ]]; then
+    opam exec --switch=default -- "$binary" --version >/dev/null 2>&1
+  else
+    binary_present "$binary"
+  fi
+}
+
+rust_component_binary() {
+  if [[ "$1" == clippy ]]; then
+    printf 'cargo-clippy\n'
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
+install_rows() {
+  local manager=$1
+  local package binary
+  local -a command_args
+  while IFS=$'\t' read -r package binary; do
+    manager_binary_present "$manager" "$binary" && continue
+    case "$manager" in
+      opam) command_args=(opam install --switch=default "$package" -y) ;;
+      cargo) command_args=(rustup run stable cargo install "$package") ;;
+      go) command_args=(go install "${package}@latest") ;;
+      uv) command_args=(uv tool install "$package") ;;
+      bun) command_args=(bun add --global "${package}@latest") ;;
+      *) return 2 ;;
+    esac
+    run_command "${command_args[@]}" || return 1
+  done < <(manifest_rows "$manager")
+}
+
+ensure_rust_components() {
+  local component binary
+  while IFS= read -r component; do
+    binary=$(rust_component_binary "$component")
+    if ! binary_present "$binary"; then
+      run_command rustup component add "$component" --toolchain stable || return 1
+    fi
+  done < <(jq -r '.rust.components[]' "$manifest")
+}
+
+bootstrap() {
+  require_manager rustup || return 1
+  run_command rustup toolchain install stable || return 1
+  run_command rustup default stable || return 1
+  ensure_rust_components || return 1
+
+  require_manager elan || return 1
+  run_command elan toolchain install stable || return 1
+  run_command elan default stable || return 1
+
+  local manager
+  for manager in opam cargo go uv bun; do
+    if [[ "$manager" != cargo ]]; then
+      require_manager "$manager" || return 1
+    fi
+    if [[ "$manager" == opam && ! -f "${OPAMROOT:-${HOME}/.opam}/config" ]]; then
+      run_command opam init -y || return 1
+    fi
+    install_rows "$manager" || return 1
+  done
+}
+
+upgrade() {
+  require_manager rustup || return 1
+  run_command rustup update stable || return 1
+  run_command rustup default stable || return 1
+  ensure_rust_components || return 1
+
+  require_manager elan || return 1
+  run_command elan toolchain install stable || return 1
+  run_command elan default stable || return 1
+
+  require_manager go || return 1
+  local package
+  while IFS=$'\t' read -r package _; do
+    run_command go install "${package}@latest" || return 1
+  done < <(manifest_rows go)
+
+  require_manager uv || return 1
+  run_command uv tool upgrade --all || return 1
+
+  require_manager bun || return 1
+  while IFS=$'\t' read -r package _; do
+    run_command bun update --global "$package" --latest || return 1
+  done < <(manifest_rows bun)
+
+  require_manager opam || return 1
+  if [[ -f "${OPAMROOT:-${HOME}/.opam}/config" ]]; then
+    run_command opam update --switch=default || return 1
+    run_command opam upgrade --switch=default -y || return 1
+  else
+    printf 'mcb-toolchain: opam is not initialized; run bootstrap first\n' >&2
+    return 1
+  fi
+
+  require_manager rustup || return 1
+  while IFS=$'\t' read -r package _; do
+    run_command rustup run stable cargo install --force "$package" || return 1
+  done < <(manifest_rows cargo)
+}
+
+check_binary() {
+  local manager=$1
+  local binary=$2
+  if ! manager_binary_present "$manager" "$binary"; then
+    printf 'MISSING %s (%s)\n' "$binary" "$manager" >&2
+    return 1
+  fi
+  printf 'OK %s (%s): ' "$binary" "$manager"
+  if [[ "$manager" == opam ]]; then
+    if opam exec --switch=default -- "$binary" --version 2>&1; then
+      return 0
+    fi
+  elif "$binary" --version 2>&1; then
+    return 0
+  fi
+  printf 'FAILED version probe\n' >&2
+  return 1
+}
+
+check_manager_version() {
+  local manager=$1
+  if [[ "$manager" == cargo ]]; then
+    require_manager rustup || return 1
+    printf 'OK manager cargo: '
+    rustup run stable cargo --version 2>&1 || return 1
+    return 0
+  fi
+  require_manager "$manager" || return 1
+  printf 'OK manager %s: ' "$manager"
+  "$manager" --version 2>&1 || return 1
+}
+
+check() {
+  local failed=0 manager package binary
+  for manager in rustup elan opam cargo go uv bun; do
+    check_manager_version "$manager" || failed=1
+  done
+
+  if binary_present rustc; then
+    check_binary rust rustc || failed=1
+  else
+    printf 'MISSING rustc (rust)\n' >&2
+    failed=1
+  fi
+  while IFS= read -r package; do
+    binary=$(rust_component_binary "$package")
+    check_binary rust "$binary" || failed=1
+  done < <(jq -r '.rust.components[]' "$manifest")
+  if binary_present lean; then
+    check_binary lean lean || failed=1
+  else
+    printf 'MISSING lean (elan)\n' >&2
+    failed=1
+  fi
+  for manager in opam cargo go uv bun; do
+    while IFS=$'\t' read -r package binary; do
+      check_binary "$manager" "$binary" || failed=1
+    done < <(manifest_rows "$manager")
+  done
+  return "$failed"
+}
+
+print_command() {
+  printf 'RUN'
+  printf ' %q' "$@"
+  printf '\n'
+}
+
+plan_rows() {
+  local manager=$1
+  local package _
+  while IFS=$'\t' read -r package _; do
+    case "$manager" in
+      opam) print_command opam install --switch=default "$package" -y ;;
+      cargo) print_command rustup run stable cargo install "$package" ;;
+      go) print_command go install "${package}@latest" ;;
+      uv) print_command uv tool install "$package" ;;
+      bun) print_command bun add --global "${package}@latest" ;;
+    esac
+  done < <(manifest_rows "$manager")
+}
+
+plan_bootstrap() {
+  local component manager
+  print_command rustup toolchain install stable
+  print_command rustup default stable
+  while IFS= read -r component; do
+    print_command rustup component add "$component" --toolchain stable
+  done < <(jq -r '.rust.components[]' "$manifest")
+  print_command elan toolchain install stable
+  print_command elan default stable
+  print_command opam init -y
+  for manager in opam cargo go uv bun; do
+    plan_rows "$manager"
+  done
+}
+
+plan_upgrade() {
+  local package manager
+  print_command rustup update stable
+  print_command rustup default stable
+  while IFS= read -r package; do
+    print_command rustup component add "$package" --toolchain stable
+  done < <(jq -r '.rust.components[]' "$manifest")
+  print_command elan toolchain install stable
+  print_command elan default stable
+  while IFS=$'\t' read -r package _; do
+    print_command go install "${package}@latest"
+  done < <(manifest_rows go)
+  print_command uv tool upgrade --all
+  while IFS=$'\t' read -r package _; do
+    print_command bun update --global "$package" --latest
+  done < <(manifest_rows bun)
+  print_command opam update --switch=default
+  print_command opam upgrade --switch=default -y
+  while IFS=$'\t' read -r package _; do
+    print_command rustup run stable cargo install --force "$package"
+  done < <(manifest_rows cargo)
+}
+
+plan_check() {
+  local manager package binary
+  for manager in rustup elan opam cargo go uv bun; do
+    printf 'CHECK manager %s\n' "$manager"
+  done
+  printf 'CHECK rustc\n'
+  while IFS= read -r package; do
+    binary=$(rust_component_binary "$package")
+    printf 'CHECK %s (rust)\n' "$binary"
+  done < <(jq -r '.rust.components[]' "$manifest")
+  printf 'CHECK lean (elan)\n'
+  for manager in opam cargo go uv bun; do
+    while IFS=$'\t' read -r package binary; do
+      printf 'CHECK %s (%s)\n' "$binary" "$manager"
+    done < <(manifest_rows "$manager")
+  done
+}
+
+while (($#)); do
+  case "$1" in
+    --dry-run) dry_run=true; shift ;;
+    bootstrap|upgrade|check)
+      [[ -z "$action" ]] || { usage; exit 2; }
+      action=$1
+      shift
+      ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage; exit 2 ;;
+  esac
+done
+
+[[ -n "$action" ]] || { usage; exit 2; }
+validate_manifest
+if "$dry_run"; then
+  case "$action" in
+    bootstrap) plan_bootstrap ;;
+    upgrade) plan_upgrade ;;
+    check) plan_check ;;
+  esac
+  exit 0
+fi
+
+case "$action" in
+  bootstrap) bootstrap ;;
+  upgrade) upgrade ;;
+  check) check ;;
+esac

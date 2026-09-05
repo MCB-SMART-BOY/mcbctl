@@ -1,0 +1,3 @@
+# Home Manager local overrides are non-sensitive and must stay untracked.
+home/local.nix
+result

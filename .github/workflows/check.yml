@@ -1,0 +1,41 @@
+name: Home Manager Flake Check
+
+on:
+  push:
+    branches: [solo, main]
+  pull_request:
+    branches: [solo, main]
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-latest
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+          - system: x86_64-darwin
+            runner: macos-13
+          - system: aarch64-darwin
+            runner: macos-14
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # v14
+      - name: Scan repository secrets
+        run: nix develop --accept-flake-config -c gitleaks detect --no-git --source .
+      - name: Audit repository dependencies
+        run: nix develop --accept-flake-config -c trivy fs --scanners vuln,secret --exit-code 1 --no-progress .
+      - name: Check Nix formatting
+        run: |
+          formatter="$(nix build ".#formatter.${{ matrix.system }}" --no-link --print-out-paths)"
+          while IFS= read -r file; do
+            "$formatter/bin/nixfmt" --check "$file"
+          done < <(git ls-files '*.nix')
+      - name: Run flake checks
+        run: nix flake check --accept-flake-config --no-write-lock-file -L
+      - name: Build activation package
+        run: nix build ".#homeConfigurations.\"admin@${{ matrix.system }}\".activationPackage" --no-link -L

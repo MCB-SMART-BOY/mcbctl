@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Lock screen via Noctalia v5 IPC. Falls back to loginctl if Noctalia not running.
+set -euo pipefail
+if command -v noctalia >/dev/null 2>&1; then
+  exec noctalia msg session lock
+fi
+exec loginctl lock-session
