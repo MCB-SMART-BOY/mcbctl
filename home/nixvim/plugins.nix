@@ -92,7 +92,7 @@ in
       };
       mini-icons = {
         enable = true;
-        settings.mock_nvim_web_devicons = true;
+        mockDevIcons = true;
       };
       noice.enable = true;
       which-key.enable = true;

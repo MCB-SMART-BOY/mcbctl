@@ -59,6 +59,6 @@ in
       !config.mcb.profiles.${profile} || (config.mcb.platform.linux && pkgs.stdenv.hostPlatform.isLinux);
     message =
       "Profile '${profile}' requires the explicit Linux platform capability; "
-      + "system '${pkgs.system}' must import homeModules.linux.";
+      + "system '${pkgs.stdenv.hostPlatform.system}' must import homeModules.linux.";
   }) linuxOnlyProfiles;
 }

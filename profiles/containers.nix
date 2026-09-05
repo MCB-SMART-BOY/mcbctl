@@ -22,7 +22,7 @@ in
   config = lib.mkIf config.mcb.profiles.containers {
     assertions = [
       {
-        assertion = pkgs.system == winboatSystem;
+        assertion = pkgs.stdenv.hostPlatform.system == winboatSystem;
         message = "The containers profile requires system '${winboatSystem}' because WinBoat is x86_64-linux only.";
       }
     ];
@@ -46,6 +46,6 @@ in
         # microVM（AWS Firecracker）
         firecracker
       ]
-      ++ lib.optional (pkgs.system == winboatSystem) winboatWithVmx;
+      ++ lib.optional (pkgs.stdenv.hostPlatform.system == winboatSystem) winboatWithVmx;
   };
 }
